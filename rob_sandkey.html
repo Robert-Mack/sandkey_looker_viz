@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Looker Custom Sankey Chart</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            overflow: hidden; /* Prevent scrollbars from appearing due to SVG */
+            background-color: #f8f9fa; /* Light background */
+        }
+        .sankey-container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+        .node rect {
+            fill-opacity: 0.9;
+            shape-rendering: crispEdges;
+            stroke-width: 0;
+            transition: fill-opacity 0.2s ease-in-out;
+            cursor: pointer;
+            filter: drop-shadow(2px 2px 2px rgba(0,0,0,0.2)); /* Subtle shadow */
+        }
+        .node rect:hover {
+            fill-opacity: 1;
+        }
+        .node text {
+            font-size: 10px;
+            pointer-events: none;
+            text-shadow: 0 1px 0 #fff;
+            fill: #333;
+        }
+        .link {
+            fill: none;
+            stroke-opacity: 0.3;
+            transition: stroke-opacity 0.2s ease-in-out;
+            cursor: pointer;
+        }
+        .link:hover {
+            stroke-opacity: 0.6;
+        }
+        .tooltip {
+            position: absolute;
+            text-align: center;
+            width: auto;
+            height: auto;
+            padding: 8px;
+            font: 12px sans-serif;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            pointer-events: none;
+            opacity: 0;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            transition: opacity 0.2s ease-in-out;
+            z-index: 1000;
+        }
+        .tooltip strong {
+            display: block;
+            margin-bottom: 4px;
+            color: #333;
+        }
+        .tooltip span {
+            color: #555;
+        }
+    </style>
+</head>
+<body>
+    <div id="sankey-chart" class="sankey-container"></div>
+
+    <script>
+        // Define the Looker custom visualization
+        // Check if looker and its plugins object exist before adding the visualization
+        // This prevents ReferenceError when running the HTML file directly in a browser
+        if (typeof looker !== 'undefined' && looker.plugins && looker.plugins.visualizations) {
+            looker.plugins.visualizations.add({
+                // Define the properties that can be configured in Looker
+                options: {
+                    node_width: {
+                        type: "number",
+                        label: "Node Width",
+                        default: 15,
+                        min: 5,
+                        max: 50,
+                        section: "Sankey Settings",
+                        order: 1
+                    },
+                    node_padding: {
+                        type: "number",
+                        label: "Node Padding",
+                        default: 10,
+                        min: 1,
+                        max: 50,
+                        section: "Sankey Settings",
+                        order: 2
+                    },
+                    link_opacity: {
+                        type: "number",
+                        label: "Link Opacity",
+                        default: 0.3,
+                        min: 0.1,
+                        max: 1.0,
+                        step: 0.1,
+                        section: "Sankey Settings",
+                        order: 3
+                    },
+                    label_font_size: {
+                        type: "number",
+                        label: "Label Font Size",
+                        default: 10,
+                        min: 8,
+                        max: 20,
+                        section: "Sankey Settings",
+                        order: 4
+                    },
+                    color_scheme: {
+                        type: "string",
+                        label: "Color Scheme",
+                        display: "select",
+                        values: [
+                            {"Blue-Green": "schemeBlues"},
+                            {"Purple-Green": "schemePRGn"},
+                            {"Spectral": "schemeSpectral"},
+                            {"Category10": "schemeCategory10"},
+                            {"Set1": "schemeSet1"},
+                            {"Pastel1": "schemePastel1"}
+                        ],
+                        default: "schemeCategory10",
+                        section: "Colors",
+                        order: 1
+                    }
+                },
+
+                // Create the initial SVG element
+                create: function(element) {
+                    this.svg = d3.select(element).append("svg")
+                        .attr("width", "100%")
+                        .attr("height", "100%");
+
+                    this.tooltip = d3.select("body").append("div")
+                        .attr("class", "tooltip")
+                        .style("opacity", 0);
+                },
+
+                // Update the visualization when data or options change
+                update: function(data, element, config, queryResponse) {
+                    // Clear previous chart elements
+                    this.svg.selectAll("*").remove();
+
+                    const dimensions = queryResponse.fields.dimension_like;
+                    const measures = queryResponse.fields.measure_like;
+
+                    // Ensure at least two dimensions and one measure are selected
+                    if (dimensions.length < 2 || measures.length === 0) {
+                        this.svg.append("text")
+                            .attr("x", "50%")
+                            .attr("y", "50%")
+                            .attr("text-anchor", "middle")
+                            .attr("dominant-baseline", "middle")
+                            .attr("font-size", "16px")
+                            .attr("fill", "#888")
+                            .text("Please select at least two dimensions (for stages) and one measure.");
+                        return;
+                    }
+
+                    // Limit to 7 dimensions (stages)
+                    const stageDimensions = dimensions.slice(0, 7);
+                    const valueMeasure = measures[0]; // Use the first measure as the value
+
+                    const width = element.offsetWidth;
+                    const height = element.offsetHeight;
+
+                    this.svg.attr("width", width).attr("height", height);
+
+                    const sankey = d3.sankey()
+                        .nodeWidth(config.node_width)
+                        .nodePadding(config.node_padding)
+                        .extent([[1, 1], [width - 1, height - 5]]); // Adjust extent for labels
+
+                    let nodesMap = new Map(); // Map to store nodes by name and assign unique IDs
+                    let linksMap = new Map(); // Map to store links by source-target pair and aggregate values
+                    let nodeCounter = 0;
+
+                    // Process data to create nodes and links
+                    data.forEach(row => {
+                        const value = row[valueMeasure.name].value;
+                        if (value === null || value === undefined || value === 0) return; // Skip null/undefined/zero values
+
+                        for (let i = 0; i < stageDimensions.length; i++) {
+                            const currentDim = stageDimensions[i];
+                            const currentName = row[currentDim.name].value;
+
+                            if (currentName === null || currentName === undefined) continue;
+
+                            // Add current node
+                            if (!nodesMap.has(currentName)) {
+                                nodesMap.set(currentName, { name: currentName, id: nodeCounter++ });
+                            }
+
+                            // Add link to next stage if available
+                            if (i < stageDimensions.length - 1) {
+                                const nextDim = stageDimensions[i + 1];
+                                const nextName = row[nextDim.name].value;
+
+                                if (nextName === null || nextName === undefined) continue;
+
+                                if (!nodesMap.has(nextName)) {
+                                    nodesMap.set(nextName, { name: nextName, id: nodeCounter++ });
+                                }
+
+                                const sourceId = nodesMap.get(currentName).id;
+                                const targetId = nodesMap.get(nextName).id;
+                                const linkKey = `${sourceId}-${targetId}`;
+
+                                if (linksMap.has(linkKey)) {
+                                    linksMap.get(linkKey).value += value;
+                                } else {
+                                    linksMap.set(linkKey, {
+                                        source: sourceId,
+                                        target: targetId,
+                                        value: value
+                                    });
+                                }
+                            }
+                        }
+                    });
+
+                    const nodes = Array.from(nodesMap.values());
+                    const links = Array.from(linksMap.values()).map(link => {
+                        // Convert source/target IDs to actual node objects for D3-Sankey
+                        // This is crucial for D3-Sankey to correctly link nodes
+                        const sourceNode = nodes.find(n => n.id === link.source);
+                        const targetNode = nodes.find(n => n.id === link.target);
+                        return { source: sourceNode, target: targetNode, value: link.value };
+                    });
+
+                    // Check if there are any nodes or links to render
+                    if (nodes.length === 0 || links.length === 0) {
+                        this.svg.append("text")
+                            .attr("x", "50%")
+                            .attr("y", "50%")
+                            .attr("text-anchor", "middle")
+                            .attr("dominant-baseline", "middle")
+                            .attr("font-size", "16px")
+                            .attr("fill", "#888")
+                            .text("No valid data to render Sankey chart. Check your selected dimensions and measures.");
+                        return;
+                    }
+
+                    // Apply the Sankey layout
+                    const { nodes: graphNodes, links: graphLinks } = sankey({ nodes: nodes, links: links });
+
+                    // Define color scale
+                    const color = d3.scaleOrdinal(d3[config.color_scheme] || d3.schemeCategory10);
+
+                    // Draw links
+                    const link = this.svg.append("g")
+                        .attr("class", "links")
+                        .attr("fill", "none")
+                        .selectAll(".link")
+                        .data(graphLinks)
+                        .enter().append("path")
+                        .attr("class", "link")
+                        .attr("d", d3.sankeyLinkHorizontal())
+                        .attr("stroke", d => color(d.source.name)) // Color links by source node
+                        .attr("stroke-width", d => Math.max(1, d.width))
+                        .style("stroke-opacity", config.link_opacity);
+
+                    link.append("title")
+                        .text(d => `${d.source.name} → ${d.target.name}\n${d3.format(",.0f")(d.value)}`);
+
+                    // Add tooltips to links
+                    link.on("mouseover", (event, d) => {
+                        this.tooltip.html(`<strong>${d.source.name} → ${d.target.name}</strong><br/><span>Flow: ${d3.format(",.0f")(d.value)}</span>`)
+                            .style("left", (event.pageX + 10) + "px")
+                            .style("top", (event.pageY - 28) + "px")
+                            .style("opacity", 1);
+                    })
+                    .on("mouseout", () => {
+                        this.tooltip.style("opacity", 0);
+                    });
+
+                    // Draw nodes
+                    const node = this.svg.append("g")
+                        .attr("class", "nodes")
+                        .selectAll(".node")
+                        .data(graphNodes)
+                        .enter().append("g")
+                        .attr("class", "node");
+
+                    node.append("rect")
+                        .attr("x", d => d.x0)
+                        .attr("y", d => d.y0)
+                        .attr("height", d => d.y1 - d.y0)
+                        .attr("width", d => d.x1 - d.x0)
+                        .attr("fill", d => color(d.name));
+
+                    node.append("text")
+                        .attr("x", d => d.x0 - 6)
+                        .attr("y", d => (d.y1 + d.y0) / 2)
+                        .attr("dy", "0.35em")
+                        .attr("text-anchor", "end")
+                        .attr("font-size", `${config.label_font_size}px`)
+                        .text(d => d.name)
+                        .filter(d => d.x0 < width / 2) // Position labels on the right for nodes on the left half
+                        .attr("x", d => d.x1 + 6)
+                        .attr("text-anchor", "start");
+
+                    // Add tooltips to nodes
+                    node.on("mouseover", (event, d) => {
+                        this.tooltip.html(`<strong>${d.name}</strong><br/><span>Incoming: ${d3.format(",.0f")(d.value)}</span>`)
+                            .style("left", (event.pageX + 10) + "px")
+                            .style("top", (event.pageY - 28) + "px")
+                            .style("opacity", 1);
+                    })
+                    .on("mouseout", () => {
+                        this.tooltip.style("opacity", 0);
+                    });
+
+                    // Allow dragging nodes (optional, but nice for interaction)
+                    function dragstarted(event, d) {
+                        d3.select(this).raise().attr("stroke", "black");
+                    }
+
+                    function dragged(event, d) {
+                        d.y0 = event.y;
+                        d.y1 = event.y + (d.y1 - d.y0);
+                        d3.select(this).attr("transform", `translate(0,${event.y - d.y0})`);
+                        sankey.update(graphNodes); // Update the layout based on new node position
+                        link.attr("d", d3.sankeyLinkHorizontal()); // Redraw links
+                    }
+
+                    function dragended(event, d) {
+                        d3.select(this).attr("stroke", null);
+                    }
+
+                    node.call(d3.drag()
+                        .on("start", dragstarted)
+                        .on("drag", dragged)
+                        .on("end", dragended));
+                }
+            });
+        } else {
+            // Provide a message if Looker object is not defined (e.g., when running locally)
+            document.addEventListener('DOMContentLoaded', (event) => {
+                const container = document.getElementById('sankey-chart');
+                if (container) {
+                    container.innerHTML = '<div style="text-align: center; padding: 20px; color: #888; font-size: 16px;">This visualization requires the Looker environment to run.</div>';
+                }
+            });
+        }
+    </script>
+</body>
+</html>
