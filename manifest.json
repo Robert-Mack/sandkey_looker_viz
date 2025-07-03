@@ -1,0 +1,7 @@
+{
+  "id": "rob_sandkey",
+  "label": "Sankey Chart (7 Stages)",
+  "url": "rob_sandkey.html",
+  "supported_features": ["table_calculations", "custom_fields"],
+  "api_version": "1.0"
+}
